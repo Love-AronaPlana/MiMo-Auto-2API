@@ -72,13 +72,30 @@ class MiMoBackend:
 
     @staticmethod
     def _generate_fingerprint():
-        """生成客户端指纹"""
+        """生成客户端指纹 (跨平台)"""
+        import socket as _socket
+
+        # hostname: cross-platform
+        try:
+            hostname = _socket.gethostname()
+        except Exception:
+            hostname = "unknown-host"
+
+        # username: cross-platform
+        try:
+            username = os.getlogin()
+        except (AttributeError, OSError):
+            try:
+                username = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown-user"
+            except Exception:
+                username = "unknown-user"
+
         seed_parts = [
-            os.uname().nodename,
+            hostname,
             platform.system(),
             platform.machine(),
             platform.processor() or "unknown-cpu",
-            os.getlogin() if hasattr(os, "getlogin") else "unknown-user",
+            username,
         ]
         return hashlib.sha256("|".join(seed_parts).encode()).hexdigest()
 
