@@ -20,6 +20,8 @@
 
 ### 2025-06-11 — v2.0.1
 
+- **修复流式输出卡住**：OpenAI 标准流式格式要求最后发送 `finish_reason: "stop"` 的终止 chunk，然后是 `data: [DONE]`。MiMo API 不一定会 emit 这个终止信号，导致客户端（如 OpenCat、ChatBox、NextChat 等）一直等待。现在服务端会检测是否收到终止信号，若缺失则自动补发标准的 `finish_reason: "stop"` chunk，确保流式输出正确结束。
+- **修复 JWT 有效期**：MiMo JWT 实际有效期约 50 分钟（3000 秒），服务端 fallback 已从 3600 秒调整为 3000 秒，减少 401 概率。
 - **修复中文乱码**：MiMo API 返回 `text/event-stream` 未声明 `charset=utf-8`，导致 `requests` 默认用 `ISO-8859-1` 解码中文成乱码。现已在所有响应上强制 `resp.encoding = "utf-8"` 并改为 `json.loads(resp.text)`，彻底根治。
 - **修复 JWT Base64 解析**：`mimo_auto_2api.py` 中 JWT payload 从来没真正 decode 过（直接从 base64url 字符串 `json.loads`），导致过期时间始终走 fallback。补全了 `base64.b64decode` + padding 补齐，现在正常解析 `exp`。
 - **跨平台指纹生成**：将 `os.uname().nodename`（仅限 Unix）和裸 `os.getlogin()`（Windows/容器易崩）替换为通用方案：
@@ -42,7 +44,7 @@ pip install requests
 ## 🚀 启动
 
 ```bash
-python3 mimo_auto_server.py
+python mimo_auto_server.py
 # 默认端口 8080
 ```
 

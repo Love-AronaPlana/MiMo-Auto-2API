@@ -125,7 +125,7 @@ class MiMoBackend:
                     if not jwt:
                         raise Exception("No JWT in response")
 
-                    # 解析过期时间
+                    # 解析过期时间 (默认有效期 50 分钟 = 3000 秒)
                     try:
                         import base64
 
@@ -137,8 +137,8 @@ class MiMoBackend:
                             base64.b64decode(payload_b64.replace("-", "+").replace("_", "/"))
                         )
                         exp = payload.get("exp", 0)
-                    except:
-                        exp = int(time.time()) + 3600
+                    except Exception:
+                        exp = int(time.time()) + 3000  # 默认 50 分钟
 
                     with self._lock:
                         self._jwt = jwt
@@ -359,25 +359,66 @@ class APIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # ═══════════════════════════════════════════════════════
+    #  SSE 流式响应发送
+    # ═══════════════════════════════════════════════════════
+
     def _send_sse(self, gen, request_id):
-        """发送 SSE 流式响应"""
+        """发送 SSE 流式响应 (符合 OpenAI 标准格式)
+
+        OpenAI 流式格式要求：
+        1. 每个数据块: data: {...json...}\n\n
+        2. 必须有 finish_reason: "stop" 的最终 chunk (delta 为空, finish_reason="stop")
+           { id: "...", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "stop" }] }
+
+        3. 最后发送 data: [DONE]\n\n
+        """
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")  # 禁用 Nginx 等代理的缓冲
         self.end_headers()
 
         try:
+            saw_finish = False
             for chunk in gen:
                 openai_chunk = handler.stream_to_openai(chunk, request_id)
-                if openai_chunk:
-                    data_str = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
-                    self.wfile.write(data_str.encode("utf-8"))
-                    self.wfile.flush()
+                if not openai_chunk:
+                    continue
 
-            # 结束流
+                # 检测 MiMo 是否已经发送了 finish_reason (如 "stop" / "length" / "tool_calls")
+                choices = openai_chunk.get("choices", [])
+                if choices and choices[0].get("finish_reason") is not None:
+                    saw_finish = True
+
+                data_str = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                self.wfile.write(data_str.encode("utf-8"))
+                self.wfile.flush()
+
+            # 如果 MiMo 流中没有 emit finish_reason="stop", 补发一个标准的终止 chunk
+            if not saw_finish:
+                finish_chunk = {
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "created": OpenAIHandler.now_ts(),
+                    "model": Config.MODEL,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+                data_str = f"data: {json.dumps(finish_chunk, ensure_ascii=False)}\n\n"
+                self.wfile.write(data_str.encode("utf-8"))
+                self.wfile.flush()
+
+            # 标准 SSE 结束标记
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
+
         except (BrokenPipeError, ConnectionResetError):
             pass
 
@@ -484,7 +525,7 @@ if __name__ == "__main__":
     HOST = sys.argv[2] if len(sys.argv) > 2 else Config.HOST
 
     server = HTTPServer((HOST, PORT), APIHandler)
-    print(f"🚀 MiMo Auto 2API Server v2.0.0")
+    print(f"🚀 MiMo Auto 2API Server v2.0.1")
     print(f"   Listening on http://{HOST}:{PORT}")
     print(f"   Model: {Config.MODEL}")
     print(f"   Endpoints:")
