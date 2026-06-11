@@ -11,6 +11,21 @@
 - **🛠️ 工具调用**：完整支持 `tools` / `tool_choice` / `function_calling`
 - **📊 流式输出**：SSE 流式与非流式双模式
 - **🔄 自动重试**：JWT 过期自动刷新，3次失败重试 + 指数退避
+- **💬 中文修复**：强制 UTF-8 编码解析响应，彻底修复 MiMo API 中文乱码
+- **🖥️ 跨平台兼容**：支持 Windows / Linux / macOS / Docker 容器运行
+
+---
+
+## 📰 更新日志
+
+### 2025-06-11 — v2.0.1
+
+- **修复中文乱码**：MiMo API 返回 `text/event-stream` 未声明 `charset=utf-8`，导致 `requests` 默认用 `ISO-8859-1` 解码中文成乱码。现已在所有响应上强制 `resp.encoding = "utf-8"` 并改为 `json.loads(resp.text)`，彻底根治。
+- **修复 JWT Base64 解析**：`mimo_auto_2api.py` 中 JWT payload 从来没真正 decode 过（直接从 base64url 字符串 `json.loads`），导致过期时间始终走 fallback。补全了 `base64.b64decode` + padding 补齐，现在正常解析 `exp`。
+- **跨平台指纹生成**：将 `os.uname().nodename`（仅限 Unix）和裸 `os.getlogin()`（Windows/容器易崩）替换为通用方案：
+  - `socket.gethostname()` — 全平台可用
+  - 安全的 `os.getlogin()` + `os.environ.get("USERNAME" / "USER")` fallback
+- **清理死代码**：删除 `mimo_auto_2api.py` 中一段 `__import__('urllib.error').error.HTTPError.__bases__[0].__subclasses__()` 逻辑错误代码。
 
 ---
 

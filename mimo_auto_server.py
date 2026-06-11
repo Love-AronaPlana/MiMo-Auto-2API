@@ -71,33 +71,43 @@ class MiMoBackend:
         self._fingerprint = self._generate_fingerprint()
 
     @staticmethod
-    def _generate_fingerprint():
-        """生成客户端指纹 (跨平台)"""
+    def _get_fingerprint_components():
+        """获取跨平台的指纹组件 (兼容 Windows 和 Linux)"""
         import socket as _socket
 
-        # hostname: cross-platform
+        # hostname: 跨平台
         try:
             hostname = _socket.gethostname()
         except Exception:
             hostname = "unknown-host"
 
-        # username: cross-platform
+        # username: 跨平台 (os.getlogin 在某些 Windows 环境或容器中会失败)
+        username = "unknown-user"
         try:
             username = os.getlogin()
         except (AttributeError, OSError):
-            try:
-                username = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown-user"
-            except Exception:
-                username = "unknown-user"
+            username = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown-user"
 
+        return {
+            "hostname": hostname,
+            "system": platform.system(),
+            "machine": platform.machine() or "unknown-machine",
+            "processor": platform.processor() or "unknown-cpu",
+            "username": username,
+        }
+
+    @classmethod
+    def _generate_fingerprint(cls):
+        """生成客户端指纹 (跨平台兼容 Windows/Linux)"""
+        components = cls._get_fingerprint_components()
         seed_parts = [
-            hostname,
-            platform.system(),
-            platform.machine(),
-            platform.processor() or "unknown-cpu",
-            username,
+            components["hostname"],
+            components["system"],
+            components["machine"],
+            components["processor"],
+            components["username"],
         ]
-        return hashlib.sha256("|".join(seed_parts).encode()).hexdigest()
+        return hashlib.sha256("|".join(seed_parts).encode("utf-8")).hexdigest()
 
     def _bootstrap(self):
         """从 MiMo 获取 JWT Token"""
@@ -193,6 +203,9 @@ class MiMoBackend:
             stream=stream,
             timeout=120,
         )
+        # 强制 UTF-8 编码，避免 MiMo API 返回的 text/event-stream
+        # 因未声明 charset 而被默认当作 ISO-8859-1 解析导致中文乱码
+        resp.encoding = "utf-8"
 
         # 401/403 -> 刷新 token 重试
         if resp.status_code in (401, 403):
@@ -208,6 +221,7 @@ class MiMoBackend:
                 stream=stream,
                 timeout=120,
             )
+            resp.encoding = "utf-8"
 
         # 429 或 5xx -> 重试
         retry_count = 0
@@ -222,6 +236,7 @@ class MiMoBackend:
                 stream=stream,
                 timeout=120,
             )
+            resp.encoding = "utf-8"
             retry_count += 1
 
         if resp.status_code != 200:
@@ -231,7 +246,8 @@ class MiMoBackend:
         if stream:
             return self._stream_parse(resp.iter_lines(decode_unicode=True))
 
-        return resp.json()
+        # 非流式请求时，使用 text 属性 + 显式 UTF-8 解码，防止 json() 因编码猜错导致中文乱码
+        return json.loads(resp.text)
 
     def _stream_parse(self, lines):
         """解析 SSE 流"""

@@ -56,17 +56,39 @@ class MiMoAutoClient:
         self._fingerprint = self._generate_fingerprint()
 
     @staticmethod
-    def _generate_fingerprint():
-        """生成客户端指纹用于身份跟踪"""
+    def _get_fingerprint_components():
+        """获取跨平台的指纹组件 (兼容 Windows 和 Linux)"""
+        import socket as _socket
+        try:
+            hostname = _socket.gethostname()
+        except Exception:
+            hostname = "unknown-host"
+        # username: 跨平台兼容 (os.getlogin 在某些 Windows 环境或容器中会失败)
+        username = "unknown-user"
+        try:
+            username = os.getlogin()
+        except (AttributeError, OSError):
+            username = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown-user"
+        return {
+            "hostname": hostname,
+            "system": platform.system() or "unknown",
+            "machine": platform.machine() or "unknown",
+            "processor": platform.processor() or "unknown-cpu",
+            "username": username,
+        }
+
+    @classmethod
+    def _generate_fingerprint(cls):
+        """生成客户端指纹 (跨平台兼容 Windows/Linux)"""
+        components = cls._get_fingerprint_components()
         seed_parts = [
-            os.uname().nodename,
-            platform.system(),
-            platform.machine(),
-            platform.processor() or "unknown-cpu",
-            os.getlogin() if hasattr(os, "getlogin") else "unknown-user"
+            components["hostname"],
+            components["system"],
+            components["machine"],
+            components["processor"],
+            components["username"],
         ]
-        seed = "|".join(seed_parts)
-        return hashlib.sha256(seed.encode()).hexdigest()
+        return hashlib.sha256("|".join(seed_parts).encode("utf-8")).hexdigest()
 
     # ────────────────────────────────
     # 通用重试请求 (带指数退避)
@@ -111,9 +133,6 @@ class MiMoAutoClient:
             except urllib.error.HTTPError as e:
                 last_exception = e
                 status = e.code
-                # 401/403 不需要重试 (Token 问题, 直接刷新)
-                if status in __import__('urllib.error').error.HTTPError.__bases__[0].__subclasses__():
-                    pass
                 # 4xx 客户端错误不重试 (除 429)
                 if 400 <= status < 500 and status != 429:
                     raise Exception(f"HTTP {status}: {e.reason}") from e
@@ -154,16 +173,22 @@ class MiMoAutoClient:
         if not jwt:
             raise Exception(f"No JWT in response: {body[:500]}")
 
-        # 解析过期时间
+        # 解析 JWT 过期时间 (Base64URL -> Base64 -> decode -> JSON)
+        exp = None
         try:
-            payload = json_mod.loads(
-                jwt.split(".")[1]
-                  .replace("-", "+")
-                  .replace("_", "/")
-                  .encode()
-            )
+            import base64
+            payload_b64 = jwt.split(".")[1]
+            # 补齐 Base64 填充
+            padding = 4 - len(payload_b64) % 4
+            if padding != 4:
+                payload_b64 += "=" * padding
+            payload_bytes = base64.b64decode(payload_b64.replace("-", "+").replace("_", "/"))
+            payload = json_mod.loads(payload_bytes.decode("utf-8"))
             exp = payload.get("exp", 0) * 1000
-        except:
+        except Exception:
+            exp = None
+
+        if exp is None:
             exp = (time.time() + 50 * 60) * 1000
 
         self._jwt = jwt

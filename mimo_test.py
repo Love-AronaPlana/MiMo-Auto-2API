@@ -28,17 +28,28 @@ MODEL = "mimo-auto"
 
 # ==== 生成客户端指纹 ====
 def get_client_fingerprint():
-    """生成唯一的客户端指纹 (Persistent)"""
+    """生成唯一的客户端指纹 (Persistent) - 兼容 Windows 和 Linux"""
     # 基于机器信息生成一个不变的指纹
+    import socket as _socket
+    try:
+        hostname = _socket.gethostname()
+    except Exception:
+        hostname = "unknown-host"
+    username = "unknown-user"
+    try:
+        username = os.getlogin()
+    except (AttributeError, OSError):
+        username = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown-user"
+
     seed_parts = [
-        os.uname().nodename,
-        platform.system(),
-        platform.machine(),
+        hostname,
+        platform.system() or "unknown",
+        platform.machine() or "unknown",
         platform.processor() or "unknown-cpu",
-        os.getlogin() if hasattr(os, "getlogin") else "unknown-user"
+        username,
     ]
     seed = "|".join(seed_parts)
-    return hashlib.sha256(seed.encode()).hexdigest()
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
 # ==== 获取 JWT ====
