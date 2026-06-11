@@ -20,14 +20,15 @@
 
 ### 2025-06-11 — v2.0.1
 
-- **修复流式输出卡住**：OpenAI 标准流式格式要求最后发送 `finish_reason: "stop"` 的终止 chunk，然后是 `data: [DONE]`。MiMo API 不一定会 emit 这个终止信号，导致客户端（如 OpenCat、ChatBox、NextChat 等）一直等待。现在服务端会检测是否收到终止信号，若缺失则自动补发标准的 `finish_reason: "stop"` chunk，确保流式输出正确结束。
+- **修复流式输出卡住 (HTTP/1.1 chunked)**：根本原因是 Python `BaseHTTPRequestHandler` 默认用 `HTTP/1.0`。流式传输没有 `Content-Length`，而 `HTTP/1.0` 不支持 `Transfer-Encoding: chunked`，第三方客户端（OpenCat/ChatBox/NextChat/requests/curl 等）无法判断响应边界，会一直卡住等待。
+  - 设置 `protocol_version = "HTTP/1.1"` 启用 HTTP/1.1
+  - 在 SSE 流中手动实现 chunked encoding（hex-len + CRLF + data + CRLF），流结束后发送空块 `0\r\n\r\n` 标识结束
+  - 补发 `finish_reason: "stop"` 终止 chunk（若 MiMo 未发送）
 - **修复 JWT 有效期**：MiMo JWT 实际有效期约 50 分钟（3000 秒），服务端 fallback 已从 3600 秒调整为 3000 秒，减少 401 概率。
-- **修复中文乱码**：MiMo API 返回 `text/event-stream` 未声明 `charset=utf-8`，导致 `requests` 默认用 `ISO-8859-1` 解码中文成乱码。现已在所有响应上强制 `resp.encoding = "utf-8"` 并改为 `json.loads(resp.text)`，彻底根治。
-- **修复 JWT Base64 解析**：`mimo_auto_2api.py` 中 JWT payload 从来没真正 decode 过（直接从 base64url 字符串 `json.loads`），导致过期时间始终走 fallback。补全了 `base64.b64decode` + padding 补齐，现在正常解析 `exp`。
-- **跨平台指纹生成**：将 `os.uname().nodename`（仅限 Unix）和裸 `os.getlogin()`（Windows/容器易崩）替换为通用方案：
-  - `socket.gethostname()` — 全平台可用
-  - 安全的 `os.getlogin()` + `os.environ.get("USERNAME" / "USER")` fallback
-- **清理死代码**：删除 `mimo_auto_2api.py` 中一段 `__import__('urllib.error').error.HTTPError.__bases__[0].__subclasses__()` 逻辑错误代码。
+- **修复中文乱码**：强制 `resp.encoding = "utf-8"`，彻底根治 `ISO-8859-1` 解码导致的中文乱码。
+- **修复 JWT Base64 解析**：补全 `base64.b64decode` + padding 补齐，正常解析 `exp`。
+- **跨平台指纹生成**：替换为 `socket.gethostname()` + 安全的 `os.getlogin()` fallback。
+- **清理死代码**：删除 `mimo_auto_2api.py` 中的逻辑错误代码。
 
 ---
 

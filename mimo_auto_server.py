@@ -344,7 +344,9 @@ handler = OpenAIHandler()
 
 
 class APIHandler(BaseHTTPRequestHandler):
-    """OpenAI API 兼容的 HTTP 请求处理器"""
+    """OpenAI API 兼容的 HTTP 请求处理器 (HTTP/1.1 + chunked)"""
+
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, format, *args):
         print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}] {self.address_string()} - {format % args}")
@@ -360,43 +362,53 @@ class APIHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     # ═══════════════════════════════════════════════════════
-    #  SSE 流式响应发送
+    #  HTTP Chunked Encoding 辅助方法
+    # ═══════════════════════════════════════════════════════
+
+    def _write_chunk(self, data: bytes):
+        """写入一个 HTTP/1.1 chunked 数据块 (hex-len + CRLF + data + CRLF)"""
+        length_hex = f"{len(data):X}\r\n".encode("ascii")
+        self.wfile.write(length_hex)
+        self.wfile.write(data)
+        self.wfile.write(b"\r\n")
+        self.wfile.flush()
+
+    # ═══════════════════════════════════════════════════════
+    #  SSE 流式响应发送 (chunked encoding)
     # ═══════════════════════════════════════════════════════
 
     def _send_sse(self, gen, request_id):
-        """发送 SSE 流式响应 (符合 OpenAI 标准格式)
+        """发送 SSE 流式响应 (OpenAI 标准 + HTTP chunked encoding)
 
-        OpenAI 流式格式要求：
-        1. 每个数据块: data: {...json...}\n\n
-        2. 必须有 finish_reason: "stop" 的最终 chunk (delta 为空, finish_reason="stop")
-           { id: "...", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "stop" }] }
-
-        3. 最后发送 data: [DONE]\n\n
+        为什么用 chunked:
+            流式传输没有 Content-Length，HTTP/1.1 必须声明 Transfer-Encoding: chunked
+            否则客户端(如 requests / curl / OpenAI SDK)无法判断响应边界，会无限等待。
         """
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")  # 禁用 Nginx 等代理的缓冲
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
         try:
             saw_finish = False
-            for chunk in gen:
-                openai_chunk = handler.stream_to_openai(chunk, request_id)
+            for mimo_chunk in gen:
+                openai_chunk = handler.stream_to_openai(mimo_chunk, request_id)
                 if not openai_chunk:
                     continue
 
-                # 检测 MiMo 是否已经发送了 finish_reason (如 "stop" / "length" / "tool_calls")
+                # 检测是否收到终止信号
                 choices = openai_chunk.get("choices", [])
                 if choices and choices[0].get("finish_reason") is not None:
                     saw_finish = True
 
-                data_str = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
-                self.wfile.write(data_str.encode("utf-8"))
-                self.wfile.flush()
+                # 以 SSE 格式 + chunked 编码发送
+                data = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+                self._write_chunk(data)
 
-            # 如果 MiMo 流中没有 emit finish_reason="stop", 补发一个标准的终止 chunk
+            # 如果 MiMo 没发 finish_reason="stop"，补发标准终止 chunk
             if not saw_finish:
                 finish_chunk = {
                     "id": request_id,
@@ -411,12 +423,14 @@ class APIHandler(BaseHTTPRequestHandler):
                         }
                     ],
                 }
-                data_str = f"data: {json.dumps(finish_chunk, ensure_ascii=False)}\n\n"
-                self.wfile.write(data_str.encode("utf-8"))
-                self.wfile.flush()
+                data = f"data: {json.dumps(finish_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+                self._write_chunk(data)
 
-            # 标准 SSE 结束标记
-            self.wfile.write(b"data: [DONE]\n\n")
+            # SSE 结束标记
+            self._write_chunk(b"data: [DONE]\n\n")
+
+            # chunked 传输终止: 空块 (length = 0)
+            self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
 
         except (BrokenPipeError, ConnectionResetError):
